@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Sign a FontForge.app bundle and notarize its DMG for direct (non-App Store) distribution.
+#
+# Usage:
+#   ffsign-notarize.sh <FontForge.app> <FontForge.dmg>
+#
+# Required environment variables:
+#   FF_SIGN_IDENTITY          Codesign identity string, e.g.:
+#                               "Developer ID Application: Your Name (TEAMID)"
+#   FF_NOTARIZE_APPLE_ID      Apple ID email used for notarization
+#   FF_NOTARIZE_PASSWORD      App-specific password (or "@keychain:<label>" for local keychain)
+#   FF_NOTARIZE_TEAM_ID       10-character Apple Team ID
+#
+# Optional (CI only — skipped when not set):
+#   FF_CERT_P12_B64           Base64-encoded Developer ID .p12 certificate
+#   FF_CERT_P12_PASSWORD      Password for the .p12 file
+#
+# On success the DMG is stapled in-place and ready for distribution.
+
+set -e -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ENTITLEMENTS="$REPO_ROOT/osx/entitlements.plist"
+
+APPDIR="$(realpath "$1")"
+DMG="$(realpath "$2")"
+
+if [[ -z "$APPDIR" || -z "$DMG" ]]; then
+    echo "Usage: $(basename "$0") <FontForge.app> <FontForge.dmg>" >&2
+    exit 1
+fi
+if [[ ! -d "$APPDIR" ]]; then echo "ERROR: Not a directory: $APPDIR" >&2; exit 1; fi
+if [[ ! -f "$DMG"    ]]; then echo "ERROR: DMG not found: $DMG"     >&2; exit 1; fi
+
+for var in FF_SIGN_IDENTITY FF_NOTARIZE_APPLE_ID FF_NOTARIZE_PASSWORD FF_NOTARIZE_TEAM_ID; do
+    if [[ -z "${!var}" ]]; then
+        echo "ERROR: Required environment variable $var is not set." >&2
+        exit 1
+    fi
+done
+
+# ── Optional: import certificate from base64 P12 (CI path) ───────────────────
+KEYCHAIN_NAME="ff-build-$(date +%s).keychain"
+KEYCHAIN_CREATED=0
+
+if [[ -n "$FF_CERT_P12_B64" ]]; then
+    echo "==> Importing Developer ID certificate into temporary keychain..."
+    KEYCHAIN_PATH="$TMPDIR/$KEYCHAIN_NAME"
+    P12_PATH="$TMPDIR/ff-cert-$$.p12"
+
+    security create-keychain -p "" "$KEYCHAIN_PATH"
+    security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+    security unlock-keychain -p "" "$KEYCHAIN_PATH"
+
+    echo "$FF_CERT_P12_B64" | base64 --decode -o "$P12_PATH"
+    security import "$P12_PATH" \
+        -k "$KEYCHAIN_PATH" \
+        -P "${FF_CERT_P12_PASSWORD:-}" \
+        -T /usr/bin/codesign \
+        -T /usr/bin/security
+    security set-key-partition-list \
+        -S apple-tool:,apple:,codesign: \
+        -s -k "" "$KEYCHAIN_PATH"
+
+    # Prepend our keychain so codesign finds the cert.
+    # Word-splitting $EXISTING_KEYCHAINS is intentional — each path is a separate arg.
+    # shellcheck disable=SC2086
+    EXISTING_KEYCHAINS=$(security list-keychains -d user | sed 's/"//g' | tr -d '\n' | xargs)
+    security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS  # SC2086 intentional
+    KEYCHAIN_CREATED=1
+
+    rm -f "$P12_PATH"
+fi
+
+cleanup() {
+    if [[ $KEYCHAIN_CREATED -eq 1 ]]; then
+        echo "==> Removing temporary keychain..."
+        security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# ── Sign the app bundle ───────────────────────────────────────────────────────
+echo "==> Signing dylibs and frameworks inside $APPDIR ..."
+
+# Sign all dylibs/executables from deepest to shallowest, then the bundle itself
+find "$APPDIR" \
+    \( -name "*.dylib" -o -name "*.so" \) \
+    -not -name "*.py" \
+    | sort -r \
+    | while read -r lib; do
+        codesign --force --verify --verbose=1 \
+            --options runtime \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$FF_SIGN_IDENTITY" \
+            "$lib"
+    done
+
+# Sign the Python.framework Versions symlink target explicitly
+find "$APPDIR/Contents/Frameworks" \
+    -name "Python" -type f \
+    | while read -r pybin; do
+        codesign --force --verify --verbose=1 \
+            --options runtime \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$FF_SIGN_IDENTITY" \
+            "$pybin"
+    done
+
+# Sign the main app bundle (must be last)
+echo "==> Signing $APPDIR ..."
+codesign --force --verify --verbose=1 \
+    --options runtime \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$FF_SIGN_IDENTITY" \
+    "$APPDIR"
+
+codesign --verify --deep --strict --verbose=2 "$APPDIR"
+echo "✓ App bundle signature verified."
+
+# ── Sign the DMG ──────────────────────────────────────────────────────────────
+echo "==> Signing DMG: $DMG ..."
+codesign --force --verify --verbose=1 \
+    --sign "$FF_SIGN_IDENTITY" \
+    "$DMG"
+
+# ── Notarize ──────────────────────────────────────────────────────────────────
+echo "==> Submitting DMG for notarization (this may take a few minutes)..."
+xcrun notarytool submit "$DMG" \
+    --apple-id  "$FF_NOTARIZE_APPLE_ID" \
+    --password  "$FF_NOTARIZE_PASSWORD" \
+    --team-id   "$FF_NOTARIZE_TEAM_ID"  \
+    --wait \
+    --timeout 30m
+
+# ── Staple ────────────────────────────────────────────────────────────────────
+echo "==> Stapling notarization ticket to DMG..."
+xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
+
+echo ""
+echo "✓ Done. Signed, notarized, and stapled:"
+echo "  $DMG"
