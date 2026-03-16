@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 # Update the version for each new release
-project(fontforge VERSION 20251009 LANGUAGES C CXX)
+project(fontforge VERSION 20260316 LANGUAGES C CXX)
 
 # Detect if we're being built by scikit-build-core for wheel packaging
 # SKBUILD is set automatically by scikit-build-core
