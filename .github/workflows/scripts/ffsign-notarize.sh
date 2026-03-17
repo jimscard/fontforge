@@ -82,35 +82,55 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Sign the app bundle ───────────────────────────────────────────────────────
-echo "==> Signing dylibs and frameworks inside $APPDIR ..."
+# Signing order: deepest-first to shallowest.
+# Python.framework requires special handling: sign the Versions/X.Y bundle
+# as a unit (not individual files inside it) so codesign correctly seals the
+# Versions/Current symlink and the nested Python.app subcomponent.
 
-# Sign all dylibs/executables from deepest to shallowest, then the bundle itself
+echo "==> Signing dylibs inside $APPDIR ..."
+
+# 1. Sign all .dylib/.so files that are NOT inside Python.framework
+#    (Python.framework internals are handled by signing the framework bundle below)
 find "$APPDIR" \
     \( -name "*.dylib" -o -name "*.so" \) \
-    -not -name "*.py" \
+    | grep -v '/Python\.framework/' \
     | sort -r \
     | while read -r lib; do
-        codesign --force --verify --verbose=1 \
+        codesign --force \
             --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$FF_SIGN_IDENTITY" \
             "$lib"
     done
 
-# Sign the Python.framework Versions symlink target explicitly
-find "$APPDIR/Contents/Frameworks" \
-    -name "Python" -type f \
-    | while read -r pybin; do
-        codesign --force --verify --verbose=1 \
+# 2. Sign .dylib/.so files inside Python.framework (deepest first, before the bundle seal)
+find "$APPDIR/Contents/Frameworks/Python.framework" \
+    \( -name "*.dylib" -o -name "*.so" \) \
+    | sort -r \
+    | while read -r lib; do
+        codesign --force \
             --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$FF_SIGN_IDENTITY" \
-            "$pybin"
+            "$lib"
     done
 
-# Sign the main app bundle (must be last)
+# 3. Sign Python.framework/Versions/X.Y as a bundle — this seals the framework
+#    including the nested Python.app and the Versions/Current symlink target.
+find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
+    -mindepth 1 -maxdepth 1 -type d \
+    | while read -r ver; do
+        echo "==> Signing Python.framework version bundle: $ver"
+        codesign --force \
+            --options runtime \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$FF_SIGN_IDENTITY" \
+            "$ver"
+    done
+
+# 4. Sign the main app bundle (must be last)
 echo "==> Signing $APPDIR ..."
-codesign --force --verify --verbose=1 \
+codesign --force \
     --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$FF_SIGN_IDENTITY" \
