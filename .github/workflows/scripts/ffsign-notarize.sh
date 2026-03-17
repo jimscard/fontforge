@@ -97,6 +97,7 @@ find "$APPDIR" \
     | sort -r \
     | while read -r lib; do
         codesign --force \
+            --timestamp \
             --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$FF_SIGN_IDENTITY" \
@@ -109,6 +110,7 @@ find "$APPDIR/Contents/Frameworks/Python.framework" \
     | sort -r \
     | while read -r lib; do
         codesign --force \
+            --timestamp \
             --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$FF_SIGN_IDENTITY" \
@@ -122,6 +124,7 @@ find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
     | while read -r ver; do
         echo "==> Signing Python.framework version bundle: $ver"
         codesign --force \
+            --timestamp \
             --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$FF_SIGN_IDENTITY" \
@@ -131,6 +134,7 @@ find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
 # 4. Sign the main app bundle (must be last)
 echo "==> Signing $APPDIR ..."
 codesign --force \
+    --timestamp \
     --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$FF_SIGN_IDENTITY" \
@@ -141,7 +145,8 @@ echo "✓ App bundle signature verified."
 
 # ── Sign the DMG ──────────────────────────────────────────────────────────────
 echo "==> Signing DMG: $DMG ..."
-codesign --force --verify --verbose=1 \
+codesign --force \
+    --timestamp \
     --sign "$FF_SIGN_IDENTITY" \
     "$DMG"
 
