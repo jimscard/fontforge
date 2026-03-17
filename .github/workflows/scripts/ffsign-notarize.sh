@@ -115,8 +115,19 @@ done < <(find "$APPDIR" \( -name "*.dylib" -o -name "*.so" \) \
 #    This covers opt/local/bin/* (fontforge utilities) and
 #    Python.framework/.../bin/python* — Apple requires hardened runtime on
 #    all executables for notarization.
-echo "==> Signing Mach-O executables in bin/ directories..."
+#
+#    IMPORTANT: FontForge.app's CFBundleExecutable is a relative path that
+#    resolves to opt/local/bin/fontforge — this is the *bundle main binary*
+#    and must NOT be pre-signed here. If it is signed in this step (CDHash-A)
+#    and then re-signed by the app bundle signing in step 5 (CDHash-B),
+#    CodeResources would have been computed with the stale CDHash-A, causing
+#    Apple notarization to report "The signature of the binary is invalid."
+#    The app bundle signing (step 5) handles the main binary correctly.
+BUNDLE_EXEC_NAME=$(basename \
+    "$(defaults read "$APPDIR/Contents/Info" CFBundleExecutable 2>/dev/null || true)")
+echo "==> Signing Mach-O executables in bin/ directories (skipping bundle main: $BUNDLE_EXEC_NAME)..."
 while IFS= read -r exe; do
+    [[ -n "$BUNDLE_EXEC_NAME" && "$(basename "$exe")" == "$BUNDLE_EXEC_NAME" ]] && continue
     if file "$exe" 2>/dev/null | grep -qE "Mach-O.*executable"; then
         codesign --force --timestamp --options runtime \
             --sign "$FF_SIGN_IDENTITY" "$exe"
