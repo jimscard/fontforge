@@ -102,6 +102,43 @@ find "$APPDIR/Contents/Frameworks" \
     -name "test" -path "*/python*/test" -prune \
     -exec rm -rf {} \; 2>/dev/null || true
 
+# 0b. Normalize bundle structure so codesign treats fontforge as ONLY the
+#     main binary — not as both a main binary and a CodeResources resource.
+#
+#     The upstream Info.plist sets CFBundleExecutable to a non-standard
+#     relative path ("../Resources/opt/local/bin/fontforge"), which causes
+#     codesign to include fontforge in both the main binary slot AND the
+#     CodeResources hash table.  Apple's notarization server rejects this
+#     CDHash conflict with "The signature of the binary is invalid."
+#
+#     Fix:
+#       1. Copy the real binary to the standard Contents/MacOS/<name> location.
+#       2. Replace Contents/Resources/opt/local/bin/<name> with a relative
+#          symlink pointing back to Contents/MacOS/<name>.
+#       3. Update Info.plist CFBundleExecutable to just the basename.
+#
+#     After normalization codesign signs only MacOS/<name> as the main binary.
+#     The symlink at opt/local/bin/<name> is recorded in CodeResources as a
+#     stable symlink record (target path only — no hash), so there is no
+#     CDHash conflict.
+BUNDLE_EXEC_ORIG=$(defaults read "$APPDIR/Contents/Info" CFBundleExecutable 2>/dev/null || true)
+BUNDLE_EXEC_NAME=$(basename "$BUNDLE_EXEC_ORIG")
+if [[ -n "$BUNDLE_EXEC_ORIG" && "$BUNDLE_EXEC_ORIG" != "$BUNDLE_EXEC_NAME" ]]; then
+    ACTUAL_BINARY="$APPDIR/Contents/Resources/opt/local/bin/$BUNDLE_EXEC_NAME"
+    MACOS_BINARY="$APPDIR/Contents/MacOS/$BUNDLE_EXEC_NAME"
+    if [[ -f "$ACTUAL_BINARY" ]]; then
+        echo "==> Normalizing bundle: moving '$BUNDLE_EXEC_NAME' to Contents/MacOS/ ..."
+        cp "$ACTUAL_BINARY" "$MACOS_BINARY"
+        # Replace the original file with a relative symlink back to MacOS/.
+        # Relative path from opt/local/bin/ up to MacOS/ is ../../../../MacOS/.
+        rm -f "$ACTUAL_BINARY"
+        ln -s "../../../../MacOS/$BUNDLE_EXEC_NAME" "$ACTUAL_BINARY"
+        plutil -replace CFBundleExecutable -string "$BUNDLE_EXEC_NAME" \
+            "$APPDIR/Contents/Info.plist"
+        echo "    CFBundleExecutable updated: '$BUNDLE_EXEC_ORIG' → '$BUNDLE_EXEC_NAME'"
+    fi
+fi
+
 echo "==> Signing all dylibs and .so files inside $APPDIR ..."
 
 # 1. Sign ALL .dylib and .so files in the entire bundle (deepest-first by path length).
@@ -116,13 +153,11 @@ done < <(find "$APPDIR" \( -name "*.dylib" -o -name "*.so" \) \
 #    Python.framework/.../bin/python* — Apple requires hardened runtime on
 #    all executables for notarization.
 #
-#    IMPORTANT: FontForge.app's CFBundleExecutable is a relative path that
-#    resolves to opt/local/bin/fontforge — this is the *bundle main binary*
-#    and must NOT be pre-signed here. If it is signed in this step (CDHash-A)
-#    and then re-signed by the app bundle signing in step 5 (CDHash-B),
-#    CodeResources would have been computed with the stale CDHash-A, causing
-#    Apple notarization to report "The signature of the binary is invalid."
-#    The app bundle signing (step 5) handles the main binary correctly.
+#    After step 0b, opt/local/bin/fontforge is a symlink (not a regular file)
+#    so `find -type f` will not pick it up. The main binary at
+#    Contents/MacOS/fontforge is signed as part of the app bundle in step 5.
+#    The basename skip below is kept as a safety net in case normalization
+#    did not apply (e.g. CFBundleExecutable was already a plain basename).
 BUNDLE_EXEC_NAME=$(basename \
     "$(defaults read "$APPDIR/Contents/Info" CFBundleExecutable 2>/dev/null || true)")
 echo "==> Signing Mach-O executables in bin/ directories (skipping bundle main: $BUNDLE_EXEC_NAME)..."
