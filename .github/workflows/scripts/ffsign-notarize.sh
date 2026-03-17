@@ -86,46 +86,35 @@ trap cleanup EXIT
 #
 # Rules:
 #  - Individual dylibs/.so: --timestamp only (no --options runtime, no --entitlements)
-#  - Python.framework/Versions/X.Y bundle: --timestamp --options runtime (no entitlements)
+#  - Python.app bundle (nested inside Python.framework): --timestamp --options runtime
 #  - FontForge.app bundle: --timestamp --options runtime --entitlements
 #
-# Python.framework requires signing Versions/X.Y as a whole bundle so codesign
-# correctly seals the Versions/Current symlink and nested Python.app.
+# We do NOT sign Python.framework/Versions/X.Y as a bundle because doing so
+# causes codesign to re-sign all nested .so files without a secure timestamp,
+# which Apple's notarization rejects. Instead we sign Python.app individually
+# so the Versions/Current symlink is already sealed when FontForge.app is signed.
 
-echo "==> Signing dylibs and .so files inside $APPDIR ..."
+echo "==> Signing all dylibs and .so files inside $APPDIR ..."
 
-# Helper: sign a single binary file (no entitlements — only bundles need those)
-sign_bin() {
-    codesign --force --timestamp --sign "$FF_SIGN_IDENTITY" "$1"
-}
-
-# 1. Sign all .dylib/.so files outside Python.framework (deepest-first by path length)
+# 1. Sign ALL .dylib and .so files in the entire bundle (deepest-first by path length).
+#    --timestamp ensures Apple's notarytool accepts the signatures.
 while IFS= read -r lib; do
-    sign_bin "$lib"
+    codesign --force --timestamp --sign "$FF_SIGN_IDENTITY" "$lib"
 done < <(find "$APPDIR" \( -name "*.dylib" -o -name "*.so" \) \
-    | grep -v '/Python\.framework/' \
     | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 
-# 2. Sign all .dylib/.so files inside Python.framework (deepest-first)
-while IFS= read -r lib; do
-    sign_bin "$lib"
-done < <(find "$APPDIR/Contents/Frameworks/Python.framework" \
-    \( -name "*.dylib" -o -name "*.so" \) \
-    | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
-
-# 3. Sign Python.framework/Versions/X.Y as a bundle — seals the framework
-#    including nested Python.app and the Versions/Current symlink target.
-#    Use --options runtime so notarytool accepts it; no entitlements needed.
-while IFS= read -r ver; do
-    echo "==> Signing Python.framework version bundle: $ver"
+# 2. Sign Python.app bundle inside the framework.
+#    This ensures Versions/Current -> Versions/3.14/Resources/Python.app is
+#    already sealed before FontForge.app's outer seal is created.
+while IFS= read -r pyapp; do
+    echo "==> Signing nested Python.app: $pyapp"
     codesign --force --timestamp \
         --options runtime \
         --sign "$FF_SIGN_IDENTITY" \
-        "$ver"
-done < <(find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
-    -mindepth 1 -maxdepth 1 -type d)
+        "$pyapp"
+done < <(find "$APPDIR/Contents/Frameworks" -name "Python.app" -type d)
 
-# 4. Sign the main app bundle last — applies entitlements at the app level only
+# 3. Sign the main app bundle last — applies entitlements at the app level only.
 echo "==> Signing $APPDIR ..."
 codesign --force --timestamp \
     --options runtime \
