@@ -147,12 +147,30 @@ codesign --force --verify --verbose=1 \
 
 # ── Notarize ──────────────────────────────────────────────────────────────────
 echo "==> Submitting DMG for notarization (this may take a few minutes)..."
-xcrun notarytool submit "$DMG" \
+NOTARY_OUTPUT=$(xcrun notarytool submit "$DMG" \
     --apple-id  "$FF_NOTARIZE_APPLE_ID" \
     --password  "$FF_NOTARIZE_PASSWORD" \
     --team-id   "$FF_NOTARIZE_TEAM_ID"  \
     --wait \
-    --timeout 30m
+    --timeout 30m \
+    --output-format json 2>&1) || true
+
+echo "$NOTARY_OUTPUT"
+
+NOTARY_ID=$(echo "$NOTARY_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+NOTARY_STATUS=$(echo "$NOTARY_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || true)
+
+if [[ "$NOTARY_STATUS" != "Accepted" ]]; then
+    echo "ERROR: Notarization failed with status: $NOTARY_STATUS" >&2
+    if [[ -n "$NOTARY_ID" ]]; then
+        echo "==> Fetching Apple notarization log for submission $NOTARY_ID ..." >&2
+        xcrun notarytool log "$NOTARY_ID" \
+            --apple-id "$FF_NOTARIZE_APPLE_ID" \
+            --password "$FF_NOTARIZE_PASSWORD" \
+            --team-id  "$FF_NOTARIZE_TEAM_ID" >&2 || true
+    fi
+    exit 1
+fi
 
 # ── Staple ────────────────────────────────────────────────────────────────────
 echo "==> Stapling notarization ticket to DMG..."
