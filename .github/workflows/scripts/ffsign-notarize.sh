@@ -86,12 +86,21 @@ trap cleanup EXIT
 #
 # Rules:
 #  - Individual dylibs/.so: --timestamp only (no --options runtime, no --entitlements)
+#  - Mach-O executables in bin/ dirs: --timestamp --options runtime
 #  - Python.app bundle (nested inside Python.framework): --timestamp --options runtime
-#  - Python.framework/Versions/X.Y: --timestamp only — creates the CodeResources
-#    framework seal so that the Versions/Current symlink is handled correctly
-#    when FontForge.app's outer seal is computed. WITHOUT --deep so codesign
-#    seals the framework contents without re-signing individual .so files.
+#  - Python.framework/Versions/X.Y: --timestamp --options runtime — creates the
+#    CodeResources framework seal AND re-signs the Python main binary with
+#    hardened runtime. WITHOUT --deep so codesign seals the framework contents
+#    without re-signing individual .so files.
 #  - FontForge.app bundle: --timestamp --options runtime --entitlements
+
+# 0. Remove Python test fixtures BEFORE any signing so they are not referenced
+#    by the framework seal. Apple's notarization tool cannot unpack the sparse
+#    zip64 .part files used by Python's zipimport tests, causing "Invalid".
+echo "==> Removing Python test fixtures..."
+find "$APPDIR/Contents/Frameworks" \
+    -name "test" -path "*/python*/test" -prune \
+    -exec rm -rf {} \; 2>/dev/null || true
 
 echo "==> Signing all dylibs and .so files inside $APPDIR ..."
 
@@ -102,7 +111,21 @@ while IFS= read -r lib; do
 done < <(find "$APPDIR" \( -name "*.dylib" -o -name "*.so" \) \
     | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 
-# 2. Sign Python.app bundle inside the framework.
+# 2. Sign Mach-O executables in bin/ directories with hardened runtime.
+#    This covers opt/local/bin/* (fontforge utilities) and
+#    Python.framework/.../bin/python* — Apple requires hardened runtime on
+#    all executables for notarization.
+echo "==> Signing Mach-O executables in bin/ directories..."
+while IFS= read -r exe; do
+    if file "$exe" 2>/dev/null | grep -qE "Mach-O.*executable"; then
+        codesign --force --timestamp --options runtime \
+            --sign "$FF_SIGN_IDENTITY" "$exe"
+    fi
+done < <(find "$APPDIR" -path "*/bin/*" -type f \
+    ! -name "*.dylib" ! -name "*.so" \
+    | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
+
+# 3. Sign Python.app bundle inside the framework.
 while IFS= read -r pyapp; do
     echo "==> Signing nested Python.app: $pyapp"
     codesign --force --timestamp \
@@ -111,27 +134,29 @@ while IFS= read -r pyapp; do
         "$pyapp"
 done < <(find "$APPDIR/Contents/Frameworks" -name "Python.app" -type d)
 
-# 3. Seal Python.framework/Versions/X.Y as a framework bundle (no --deep).
+# 4. Seal Python.framework/Versions/X.Y as a framework bundle (no --deep).
 #    This creates _CodeSignature/CodeResources so that when FontForge.app is
-#    signed, codesign can resolve the Versions/Current symlink correctly without
-#    reporting files as "modified". Without --deep, codesign signs only the main
-#    framework binary and builds the resource seal from already-signed files;
-#    individual .so files are NOT re-signed.
+#    signed, codesign can resolve the Versions/Current symlink correctly.
+#    Without --deep, codesign signs only the main framework binary (Python)
+#    and builds the resource seal from already-signed content; individual .so
+#    files are NOT re-signed. --options runtime ensures the Python binary itself
+#    satisfies notarization's hardened-runtime requirement.
 while IFS= read -r fw_ver; do
     echo "==> Sealing Python.framework version directory: $fw_ver"
     codesign --force --timestamp \
+        --options runtime \
         --sign "$FF_SIGN_IDENTITY" \
         "$fw_ver"
-    # Spot-check that .so signatures were preserved (not overwritten).
+    # Spot-check: confirm a .so file still has our Developer ID (not re-signed).
     SAMPLE_SO=$(find "$fw_ver" -name "*.so" -type f | head -1)
     if [[ -n "$SAMPLE_SO" ]]; then
-        echo "==> Post-seal .so signature check: $SAMPLE_SO"
+        echo "==> Post-seal .so signature spot-check: $SAMPLE_SO"
         codesign -dv "$SAMPLE_SO" 2>&1 | grep -E "TeamIdentifier|Timestamp|Authority" || true
     fi
 done < <(find "$APPDIR/Contents/Frameworks" \
     -maxdepth 3 -path "*/Python.framework/Versions/[0-9]*" -type d)
 
-# 4. Sign the main app bundle last — applies entitlements at the app level only.
+# 5. Sign the main app bundle last — applies entitlements at the app level only.
 echo "==> Signing $APPDIR ..."
 codesign --force --timestamp \
     --options runtime \
