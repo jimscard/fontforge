@@ -77,6 +77,15 @@ jobs:
             build/osx/FontForge.app \
             "${{ steps.asset.outputs.dmg }}"
 
+      - name: Recompute SHA256 after signing
+        id: signed
+        run: |
+          # The signing step recreates the DMG from the signed app, so the
+          # SHA256 computed before signing is stale. Recompute it here so the
+          # Homebrew cask gets the correct checksum of the final release asset.
+          SHA256=$(shasum -a 256 "${{ steps.asset.outputs.dmg }}" | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         if: github.ref_type == 'tag'
         env:
@@ -95,7 +104,7 @@ jobs:
           .github/workflows/scripts/bump-homebrew-cask.sh \
             "jimscard/homebrew-fontforge" \
             "${{ steps.asset.outputs.version }}" \
-            "${{ steps.asset.outputs.sha256 }}"
+            "${{ steps.signed.outputs.sha256 }}"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
