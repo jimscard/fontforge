@@ -83,58 +83,51 @@ trap cleanup EXIT
 
 # ── Sign the app bundle ───────────────────────────────────────────────────────
 # Signing order: deepest-first to shallowest.
-# Python.framework requires special handling: sign the Versions/X.Y bundle
-# as a unit (not individual files inside it) so codesign correctly seals the
-# Versions/Current symlink and the nested Python.app subcomponent.
+#
+# Rules:
+#  - Individual dylibs/.so: --timestamp only (no --options runtime, no --entitlements)
+#  - Python.framework/Versions/X.Y bundle: --timestamp --options runtime (no entitlements)
+#  - FontForge.app bundle: --timestamp --options runtime --entitlements
+#
+# Python.framework requires signing Versions/X.Y as a whole bundle so codesign
+# correctly seals the Versions/Current symlink and nested Python.app.
 
-echo "==> Signing dylibs inside $APPDIR ..."
+echo "==> Signing dylibs and .so files inside $APPDIR ..."
 
-# 1. Sign all .dylib/.so files that are NOT inside Python.framework
-#    (Python.framework internals are handled by signing the framework bundle below)
-find "$APPDIR" \
-    \( -name "*.dylib" -o -name "*.so" \) \
+# Helper: sign a single binary file (no entitlements — only bundles need those)
+sign_bin() {
+    codesign --force --timestamp --sign "$FF_SIGN_IDENTITY" "$1"
+}
+
+# 1. Sign all .dylib/.so files outside Python.framework (deepest-first by path length)
+while IFS= read -r lib; do
+    sign_bin "$lib"
+done < <(find "$APPDIR" \( -name "*.dylib" -o -name "*.so" \) \
     | grep -v '/Python\.framework/' \
-    | sort -r \
-    | while read -r lib; do
-        codesign --force \
-            --timestamp \
-            --options runtime \
-            --entitlements "$ENTITLEMENTS" \
-            --sign "$FF_SIGN_IDENTITY" \
-            "$lib"
-    done
+    | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 
-# 2. Sign .dylib/.so files inside Python.framework (deepest first, before the bundle seal)
-find "$APPDIR/Contents/Frameworks/Python.framework" \
+# 2. Sign all .dylib/.so files inside Python.framework (deepest-first)
+while IFS= read -r lib; do
+    sign_bin "$lib"
+done < <(find "$APPDIR/Contents/Frameworks/Python.framework" \
     \( -name "*.dylib" -o -name "*.so" \) \
-    | sort -r \
-    | while read -r lib; do
-        codesign --force \
-            --timestamp \
-            --options runtime \
-            --entitlements "$ENTITLEMENTS" \
-            --sign "$FF_SIGN_IDENTITY" \
-            "$lib"
-    done
+    | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 
-# 3. Sign Python.framework/Versions/X.Y as a bundle — this seals the framework
-#    including the nested Python.app and the Versions/Current symlink target.
-find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
-    -mindepth 1 -maxdepth 1 -type d \
-    | while read -r ver; do
-        echo "==> Signing Python.framework version bundle: $ver"
-        codesign --force \
-            --timestamp \
-            --options runtime \
-            --entitlements "$ENTITLEMENTS" \
-            --sign "$FF_SIGN_IDENTITY" \
-            "$ver"
-    done
+# 3. Sign Python.framework/Versions/X.Y as a bundle — seals the framework
+#    including nested Python.app and the Versions/Current symlink target.
+#    Use --options runtime so notarytool accepts it; no entitlements needed.
+while IFS= read -r ver; do
+    echo "==> Signing Python.framework version bundle: $ver"
+    codesign --force --timestamp \
+        --options runtime \
+        --sign "$FF_SIGN_IDENTITY" \
+        "$ver"
+done < <(find "$APPDIR/Contents/Frameworks/Python.framework/Versions" \
+    -mindepth 1 -maxdepth 1 -type d)
 
-# 4. Sign the main app bundle (must be last)
+# 4. Sign the main app bundle last — applies entitlements at the app level only
 echo "==> Signing $APPDIR ..."
-codesign --force \
-    --timestamp \
+codesign --force --timestamp \
     --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$FF_SIGN_IDENTITY" \
